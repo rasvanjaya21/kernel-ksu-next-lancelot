@@ -259,8 +259,17 @@ jobs:
             } >> "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
           fi
 
+          if [[ "${{ env.ADD_APATCH_SUPPORT }}" == "true" || "${{ env.KPM_SUPPORT }}" == "true" ]]; then
+            for k in CONFIG_DEBUG_KERNEL CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL; do
+              grep -q "$k=y" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || {
+                sed -i "s/# $k is not set/$k=y/" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
+                sed -i "s/$k=n/$k=y/" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
+                echo "$k=y" >> "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+              }
+            done
+          fi
           if [[ "${{ env.ADD_APATCH_SUPPORT }}" == "true" ]]; then
-            for k in CONFIG_DEBUG_KERNEL CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_KALLSYMS_BASE_RELATIVE; do
+            for k in CONFIG_KALLSYMS_BASE_RELATIVE; do
               grep -q "$k=y" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || {
                 sed -i "s/# $k is not set/$k=y/" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
                 sed -i "s/$k=n/$k=y/" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
@@ -398,11 +407,14 @@ jobs:
           cp "$OUT_BOOT/Image" .
           cp "$OUT_BOOT/dts/mediatek/mt6768.dtb" .
           chmod +x patch_linux
-          ./patch_linux
-          mv -f oImage Image
-          gzip -k Image
-          cat Image.gz *.dtb > Image.gz-dtb
-          mv -f Image.gz-dtb "$OUT_BOOT/${{ env.KERNEL_IMAGE_NAME }}"
+          if ./patch_linux && [[ -f oImage ]]; then
+            mv -f oImage Image
+            gzip -k Image
+            cat Image.gz *.dtb > Image.gz-dtb
+            mv -f Image.gz-dtb "$OUT_BOOT/${{ env.KERNEL_IMAGE_NAME }}"
+          else
+            echo "WARN: patch_linux failed, keeping unpatched Image.gz-dtb (SukiSU without KPM)"
+          fi
 
       - name: Create flashable Anykernel3 zip
         if: env.CHECK_FILE_IS_OK == 'true' && env.USE_ANYKERNEL3 == 'true'
