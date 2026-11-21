@@ -200,6 +200,12 @@ jobs:
           if [[ -f "drivers/kernelsu/kernel_includes.h" ]]; then
             sed -i 's|^#include <linux/static_call.h>$|#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n#include <linux/static_call.h>\n#endif|' drivers/kernelsu/kernel_includes.h
           fi
+          if [[ -f "drivers/kernelsu/extension/kpm/kpm.c" ]]; then
+            sed -i 's/\baccess_ok(/ksu_access_ok(/g' drivers/kernelsu/extension/kpm/kpm.c
+          fi
+          if [[ -f "drivers/kernelsu/kernel_compat.h" ]]; then
+            sed -i '/^#define __KSU_H_KERNEL_COMPAT/a #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 18, 0)\n#ifndef kvcalloc\n#define kvcalloc(n, elem, flags) kvmalloc_array(n, elem, (flags) | __GFP_ZERO)\n#endif\n#endif' drivers/kernelsu/kernel_compat.h
+          fi
 
       - name: Setup Configuration for kernel
         shell: bash
