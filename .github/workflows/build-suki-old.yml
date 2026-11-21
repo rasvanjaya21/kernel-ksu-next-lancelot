@@ -197,6 +197,9 @@ jobs:
           if [[ "${{ env.KSU_REVERT }}" == "true" ]]; then
             git apply "$GITHUB_WORKSPACE/patches/KSU_REVERT.patch"
           fi
+          if [[ -f "drivers/kernelsu/kernel_includes.h" ]]; then
+            sed -i 's|^#include <linux/static_call.h>$|#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n#include <linux/static_call.h>\n#endif|' drivers/kernelsu/kernel_includes.h
+          fi
 
       - name: Setup Configuration for kernel
         shell: bash
