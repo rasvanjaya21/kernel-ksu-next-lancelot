@@ -342,6 +342,7 @@ jobs:
             echo "Toolchain not selected"; exit 1
           fi
 
+          unset DISABLE_LTO
           make ARCH="${{ env.KERNEL_ARCH }}" O=out "${DEVICE}_defconfig"
           ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
           make ARCH="${{ env.KERNEL_ARCH }}" O=out olddefconfig
