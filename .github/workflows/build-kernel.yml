@@ -380,12 +380,26 @@ jobs:
             fi
             echo "Using Clang toolchain"
             export CC=clang
+            export CLANG_TRIPLE=aarch64-linux-gnu-
             export CROSS_COMPILE=aarch64-linux-gnu-
             export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
             export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
           else
             echo "Toolchain not selected"; exit 1
           fi
+
+          make ARCH="${{ env.KERNEL_ARCH }}" O=out "${DEVICE}_defconfig"
+          ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
+          make ARCH="${{ env.KERNEL_ARCH }}" O=out olddefconfig
+          make -j"$(nproc --all)" \
+            ARCH="${{ env.KERNEL_ARCH }}" \
+            O=out \
+            CC="$CC" \
+            CLANG_TRIPLE="${CLANG_TRIPLE:-}" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            CROSS_COMPILE_COMPAT="$CROSS_COMPILE_COMPAT" \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
 
       - name: Check a kernel output files
         shell: bash
