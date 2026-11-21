@@ -148,7 +148,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace"
-          wget -nv -O clang.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-aarch64-linux-gnu.tar.xz
+          wget -nv -O clang.tar.xz "${{ env.CLANG_SOURCE }}"
           mkdir clang
           tar -C clang/ -Jxvf clang.tar.xz --strip-components=1
           rm clang.tar.xz
