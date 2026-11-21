@@ -1,0 +1,492 @@
+name: Build KernelSU-Next (A11+)
+
+on:
+  workflow_dispatch:
+    inputs:
+      select_device:
+        description: 'Select device:'
+        required: true
+        default: 'lancelot'
+        type: choice
+        options:
+          - lancelot
+          - merlin
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      DEVICE: ${{ github.event.inputs.select_device }}
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Maximize build space
+      # set REMOVE_UNUSED_PACKAGES=true in a config env file if desired
+        if: env.REMOVE_UNUSED_PACKAGES == 'true'
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Prepare environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_CONFIG_FILENAME="ksun-old"
+          TARGET_CONFIG_FILENAME="${TARGET_CONFIG_FILENAME/-old/}"
+          TARGET_CONFIG_FILENAME_SUFFIX="$TARGET_CONFIG_FILENAME"
+          if [[ -f "config-${TARGET_CONFIG_FILENAME_SUFFIX}.env" ]]; then
+            grep -v -E "^#|^[[:space:]]*$" "config-${TARGET_CONFIG_FILENAME_SUFFIX}.env" | sed 's/ #.*//; s/#.*//' >> "$GITHUB_ENV"
+          else
+            echo "Config file config-${TARGET_CONFIG_FILENAME_SUFFIX}.env not found"; exit 1
+          fi
+          if [[ "ksun-old" == *"-old" ]]; then
+            echo "ANDROID_TAG=[A11+]" >> "$GITHUB_ENV"
+          else
+            echo "ANDROID_TAG=[A13+]" >> "$GITHUB_ENV"
+          fi
+
+      - name: Check if old Android build
+        if: contains(matrix.target, 'old')
+        run: echo "OLD_ANDROID_SUPPORT=true" >> "$GITHUB_ENV"
+
+      - name: Set swap to 10G
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 10
+
+      - name: Setup kernel build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "BUILD_TIME=$(TZ=Asia/Dhaka date '+%Y%m%d%H%M')" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y \
+            lld bc bison build-essential ccache curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf \
+            imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip \
+            zlib1g-dev python3 jq unzip wget cpio tar xz-utils zstd patchelf pkg-config libelf-dev \
+            libdw-dev libiberty-dev
+          mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
+
+      - name: Install python2
+        if: env.ENABLE_PYTHON2 == 'true'
+        shell: bash
+        run: |
+            set -euo pipefail
+            mkdir -p ~/python2-jammy && cd ~/python2-jammy
+            wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/libpython2.7-minimal_2.7.18-13ubuntu1.5_amd64.deb
+            wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/python2.7-minimal_2.7.18-13ubuntu1.5_amd64.deb
+            wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/libpython2.7-stdlib_2.7.18-13ubuntu1.5_amd64.deb
+            wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/python2.7_2.7.18-13ubuntu1.5_amd64.deb
+            sudo apt-get install -y libnsl2
+            sudo dpkg -i libpython2.7-minimal_*.deb
+            sudo dpkg -i python2.7-minimal_*.deb
+            sudo dpkg -i libpython2.7-stdlib_*.deb
+            sudo dpkg -i python2.7_*.deb
+            sudo apt-get -f install -y
+            sudo ln -sf /usr/bin/python2.7 /usr/local/bin/python2
+            cd ~
+            rm -rf ~/python2-jammy
+
+      - name: Download Clang
+        if: env.USE_CLANG == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          wget -nv -O clang.tar.xz "${{ env.CLANG_SOURCE }}"
+          mkdir clang
+          tar -C clang/ -Jxvf clang.tar.xz --strip-components=1
+          rm clang.tar.xz
+          echo "Listing Clang binaries:"
+          ls -l clang/bin
+          for bin in clang ld.lld llvm-as llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
+            test -f "clang/bin/$bin" && echo "Found: $bin" || echo "Missing: $bin"
+          done
+
+      - name: Download GCC
+        if: env.USE_GCC == 'true' || env.USE_GCC_64 == 'true' || env.USE_GCC_32 == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          if [[ "${{ env.USE_GCC_64 }}" == "true" ]]; then
+            wget -nv -O gcc-64.tar.xz "${{ env.GCC_64_SOURCE }}"
+            mkdir gcc-64
+            tar -C gcc-64/ -Jxvf gcc-64.tar.xz --strip-components=1
+            rm gcc-64.tar.xz
+            for f in gcc-64/bin/aarch64-none-linux-gnu-*; do [ -e "$f" ] && ln -sf "$(basename "$f")" "${f/aarch64-none-linux-gnu-/aarch64-linux-gnu-}"; done
+            ls -l gcc-64/bin
+            test -f gcc-64/bin/aarch64-linux-gnu-gcc && echo "Found: aarch64-linux-gnu-gcc" || echo "Missing: aarch64-linux-gnu-gcc"
+          fi
+          if [[ "${{ env.USE_GCC_32 }}" == "true" ]]; then
+            wget -nv -O gcc-32.tar.xz "${{ env.GCC_32_SOURCE }}"
+            mkdir gcc-32
+            tar -C gcc-32/ -Jxvf gcc-32.tar.xz --strip-components=1
+            rm gcc-32.tar.xz
+            for f in gcc-32/bin/arm-none-linux-gnueabihf-*; do [ -e "$f" ] && ln -sf "$(basename "$f")" "${f/arm-none-linux-gnueabihf-/arm-linux-gnueabi-}"; done
+            ls -l gcc-32/bin
+            test -f gcc-32/bin/arm-linux-gnueabi-gcc && echo "Found: arm-linux-gnueabi-gcc" || echo "Missing: arm-linux-gnueabi-gcc"
+          fi
+
+      - name: Download mkbootimg tools
+        if: env.BUILD_BOOT_IMG == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg tools -b master-kernel-build-2022 --depth=1
+
+      - name: Download kernel source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          git clone --recursive "${{ env.KERNEL_SOURCE }}" -b "${{ env.KERNEL_SOURCE_BRANCH }}" android-kernel --depth=1
+
+      - name: Apply Kconfig patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+          if [[ -f "$GITHUB_WORKSPACE/patches/fix_kconfig.patch" ]]; then
+            git apply "$GITHUB_WORKSPACE/patches/fix_kconfig.patch"
+          else
+            echo "Kconfig patch not found, skipping"
+          fi
+
+      - name: Disable strong stack protector
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+          make ARCH=arm64 O=out "${DEVICE}_defconfig"
+          ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
+          make ARCH=arm64 O=out olddefconfig
+          grep CONFIG_CC_STACKPROTECTOR out/.config || true
+
+      - name: Download source boot image
+        if: env.BUILD_BOOT_IMG == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          wget -nv -O boot-source.img "${{ env.SOURCE_BOOT_IMAGE }}"
+          if [[ -f boot-source.img ]]; then
+            echo "FORMAT_MKBOOTING=$(tools/unpack_bootimg.py --boot_img=boot-source.img --format mkbootimg)" >> "$GITHUB_ENV"
+            echo "HAVE_SOURCE_BOOT_IMAGE=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup KernelSU
+        if: env.ENABLE_KERNELSU == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+          curl -LSs "$KERNELSU_SETUP_SOURCE" | bash -s "${{ env.KERNELSU_TAG }}"
+          KSU_VERSION="_$(cd "$(echo "$KERNELSU_SETUP_SOURCE" | cut -d/ -f5)" 2>/dev/null || cd KernelSU; expr "$(git rev-list --count HEAD)" + 10200)"
+          echo "UPLOADNAME=-KernelSU-ksun-old$KSU_VERSION" >> "$GITHUB_ENV"
+          if [[ "${{ env.KSU_REVERT }}" == "true" ]]; then
+            git apply "$GITHUB_WORKSPACE/patches/KSU_REVERT.patch"
+          fi
+
+      - name: Setup Configuration for kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+          if [[ "${{ env.ENABLE_KERNELSU }}" == "true" ]]; then
+            if [[ "${{ env.KSU_HOOKS_PATCH }}" == "true" ]]; then
+              git apply "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch"
+              if grep -q "CONFIG_KSU" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"; then
+                sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+                sed -i 's/CONFIG_KSU=n/CONFIG_KSU=y/' "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+              else
+                echo "CONFIG_KSU=y" >> "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+              fi
+            fi
+            if [[ "${{ env.ADD_KPROBES_CONFIG }}" == "true" && "${{ env.KSU_HOOKS_PATCH }}" != "true" ]]; then
+              {
+                echo "CONFIG_MODULES=y"
+                echo "CONFIG_KPROBES=y"
+                echo "CONFIG_HAVE_KPROBES=y"
+                echo "CONFIG_KPROBE_EVENTS=y"
+              } >> "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+            fi
+            # Add KSU related configs
+            for config in \
+              CONFIG_KSU=y \
+              CONFIG_WITH_KPROBES=n \
+              CONFIG_KSU_SUSFS=y \
+              CONFIG_KSU_SUSFS_SUS_PATH=y \
+              CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y \
+              CONFIG_KSU_SUSFS_SUS_MOUNT=y \
+              CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y \
+              CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y \
+              CONFIG_KSU_SUSFS_SUS_KSTAT=y \
+              CONFIG_KSU_SUSFS_TRY_UMOUNT=y \
+              CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y \
+              CONFIG_KSU_SUSFS_SPOOF_UNAME=y \
+              CONFIG_KSU_SUSFS_ENABLE_LOG=y \
+              CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y \
+              CONFIG_KSU_SUSFS_SPOOF_PROC_CMDLINE=y \
+              CONFIG_KSU_SUSFS_OPEN_REDIRECT=y \
+              CONFIG_KSU_SUSFS_SUS_SU=n
+            do
+              if ! grep -q "^${config%%=*}" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"; then
+                echo "$config" >> "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+              else
+                # Replace existing
+                key="${config%%=*}"
+                sed -i "s/^$key.*/$config/" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+              fi
+            done
+          fi
+
+          if [[ "${{ env.ADD_OVERLAYFS_CONFIG }}" == "true" ]]; then
+            {
+              echo "CONFIG_OVERLAY_FS=y"
+              echo "CONFIG_OVERLAY_FS_REDIRECT_DIR=y"
+              echo "CONFIG_OVERLAY_FS_INDEX=y"
+            } >> "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+          fi
+
+          if [[ "${{ env.ADD_APATCH_SUPPORT }}" == "true" ]]; then
+            for k in CONFIG_DEBUG_KERNEL CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_KALLSYMS_BASE_RELATIVE; do
+              grep -q "$k=y" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || {
+                sed -i "s/# $k is not set/$k=y/" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
+                sed -i "s/$k=n/$k=y/" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
+                echo "$k=y" >> "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+              }
+            done
+            if [[ "${{ env.FIX_APATCH_OPENELA }}" == "true" ]]; then
+              git apply "$GITHUB_WORKSPACE/patches/FIX_APATCH_OPENELA.patch" || {
+                git apply "$GITHUB_WORKSPACE/patches/REVERT_ADD_GET_CRED_RCU.patch"
+                git apply "$GITHUB_WORKSPACE/patches/FIX_APATCH_OPENELA.patch"
+              }
+            fi
+          fi
+
+          if [[ "${{ env.DISABLE_LTO }}" == "true" ]]; then
+            sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/' "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
+            sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/' "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
+            sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
+            echo "CONFIG_LTO_NONE=y" >> "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+          fi
+
+          if [[ "${{ env.DISABLE_CC_WERROR }}" == "true" ]]; then
+            echo "CONFIG_CC_WERROR=n" >> "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+          fi
+
+          if [[ "${{ env.OLD_ANDROID_SUPPORT }}" == "true" ]]; then
+            if git apply --check "$GITHUB_WORKSPACE/patches/OLD_ANDROID_SUPPORT.patch" 2>/dev/null; then
+              git apply "$GITHUB_WORKSPACE/patches/OLD_ANDROID_SUPPORT.patch"
+            else
+              echo "OLD_ANDROID_SUPPORT.patch already applied or not applicable, skipping"
+            fi
+            if grep -q "CONFIG_MMC_CRYPTO_LEGACY" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"; then
+              sed -i 's/# CONFIG_MMC_CRYPTO_LEGACY is not set/CONFIG_MMC_CRYPTO_LEGACY=y/' "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
+              sed -i 's/CONFIG_MMC_CRYPTO_LEGACY=n/CONFIG_MMC_CRYPTO_LEGACY=y/' "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
+            else
+              echo "CONFIG_MMC_CRYPTO_LEGACY=y" >> "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+            fi
+          fi
+
+          if [[ "${{ env.FIX_WIFI_SPEED }}" == "true" ]]; then
+            rm -rf drivers/misc/mediatek/connectivity
+            cd drivers/misc/mediatek
+            git clone https://github.com/Jbub5/connectivity.git --depth=1 connectivity
+            cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+          fi
+
+      - name: Setup ccache
+        if: env.ENABLE_CCACHE == 'true'
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: build-kernel-${{ env.DEVICE }}${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}
+          max-size: 2G
+
+      - name: Build kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+          if [[ "${{ env.USE_GCC }}" == "true" ]]; then
+            export PATH="$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-32/bin:$PATH"
+            echo "Using GCC toolchain"
+            export CC=aarch64-linux-gnu-gcc
+            export CROSS_COMPILE=aarch64-linux-gnu-
+            export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+          elif [[ "${{ env.USE_CLANG }}" == "true" ]]; then
+            # Add PATH for GCC binaries when using Clang
+            export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH"
+            if [[ "${{ env.USE_GCC_64 }}" == "true" || "${{ env.USE_GCC_32 }}" == "true" ]]; then
+              export PATH="$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-32/bin:$PATH"
+            fi
+            echo "Using Clang toolchain"
+            export CC=clang
+            export CLANG_TRIPLE=aarch64-linux-gnu-
+            export CROSS_COMPILE=aarch64-linux-gnu-
+            export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+          else
+            echo "Toolchain not selected"; exit 1
+          fi
+
+          make ARCH="${{ env.KERNEL_ARCH }}" O=out "${DEVICE}_defconfig"
+          ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
+          make ARCH="${{ env.KERNEL_ARCH }}" O=out olddefconfig
+          make -j"$(nproc --all)" \
+            ARCH="${{ env.KERNEL_ARCH }}" \
+            O=out \
+            CC="$CC" \
+            CLANG_TRIPLE="${CLANG_TRIPLE:-}" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            CROSS_COMPILE_COMPAT="$CROSS_COMPILE_COMPAT" \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip || {
+            echo "=== BUILD FAILED, RETRYING WITH V=1 ==="
+            make -j1 V=1 \
+              ARCH="${{ env.KERNEL_ARCH }}" \
+              O=out \
+              CC="$CC" \
+              CLANG_TRIPLE="${CLANG_TRIPLE:-}" \
+              CROSS_COMPILE="$CROSS_COMPILE" \
+              CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+              CROSS_COMPILE_COMPAT="$CROSS_COMPILE_COMPAT" \
+              LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+            exit 1
+          }
+
+      - name: Check a kernel output files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          if [[ -f "android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }}" ]]; then
+            echo "CHECK_FILE_IS_OK=true" >> "$GITHUB_ENV"
+          else
+            echo "Kernel output file is empty"; exit 1
+          fi
+          if [[ "${{ env.NEED_DTBO }}" == "true" ]]; then
+            if [[ -f "android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/dtbo.img" ]]; then
+              echo "CHECK_DTBO_IS_OK=true" >> "$GITHUB_ENV"
+            else
+              echo "DTBO image is empty"; exit 1
+            fi
+          fi
+
+      - name: Patch SukiSU Ultra KPM
+        if: env.CHECK_FILE_IS_OK == 'true' && env.KPM_SUPPORT == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_BOOT="$GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot"
+          mkdir -p "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
+          cd "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
+          wget -nv "${{ env.KPM_URL }}"
+          cp "$OUT_BOOT/Image" .
+          cp "$OUT_BOOT/dts/mediatek/mt6768.dtb" .
+          chmod +x patch_linux
+          ./patch_linux
+          mv -f oImage Image
+          gzip -k Image
+          cat Image.gz *.dtb > Image.gz-dtb
+          mv -f Image.gz-dtb "$OUT_BOOT/${{ env.KERNEL_IMAGE_NAME }}"
+
+      - name: Create flashable Anykernel3 zip
+        if: env.CHECK_FILE_IS_OK == 'true' && env.USE_ANYKERNEL3 == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          if [[ "${{ env.ANYKERNEL3_SOURCE }}" == *'.tar.gz' ]]; then
+            wget -nv -O AnyKernel3.tar.gz "${{ env.ANYKERNEL3_SOURCE }}"
+            mkdir AnyKernel3
+            tar -C AnyKernel3/ -zxvf AnyKernel3.tar.gz
+            rm AnyKernel3.tar.gz
+          elif [[ "${{ env.ANYKERNEL3_SOURCE }}" == *'.tar.xz' ]]; then
+            wget -nv -O AnyKernel3.tar.xz "${{ env.ANYKERNEL3_SOURCE }}"
+            mkdir AnyKernel3
+            tar -C AnyKernel3/ -Jxvf AnyKernel3.tar.xz
+            rm AnyKernel3.tar.xz
+          elif [[ "${{ env.ANYKERNEL3_SOURCE }}" == *'.tar.zst' ]]; then
+            wget -nv -O AnyKernel3.tar.zst "${{ env.ANYKERNEL3_SOURCE }}"
+            mkdir AnyKernel3
+            tar -C AnyKernel3/ -I zstd -xf AnyKernel3.tar.zst
+            rm AnyKernel3.tar.zst
+          elif [[ "${{ env.ANYKERNEL3_SOURCE }}" == *'.git' ]]; then
+            git clone "${{ env.ANYKERNEL3_SOURCE }}" -b "${{ env.ANYKERNEL3_BRANCH }}" --depth=1 AnyKernel3
+          else
+            wget -nv -O AnyKernel3.zip "${{ env.ANYKERNEL3_SOURCE }}"
+            mkdir AnyKernel3
+            unzip -q AnyKernel3.zip -d AnyKernel3/
+            rm AnyKernel3.zip
+          fi
+          cp "android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }}" AnyKernel3/
+          if [[ "${{ env.CHECK_DTBO_IS_OK }}" == "true" ]]; then
+            cp "android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/dtbo.img" AnyKernel3/
+          fi
+          rm -rf AnyKernel3/.git* AnyKernel3/README.md
+
+      - name: Make boot image
+        if: env.HAVE_SOURCE_BOOT_IMAGE == 'true' && env.CHECK_FILE_IS_OK == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          tools/unpack_bootimg.py --boot_img boot-source.img
+          cp "android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }}" out/kernel
+          tools/mkbootimg.py ${{ env.FORMAT_MKBOOTING }} -o boot.img
+          if [[ -f boot.img ]]; then
+            echo "MAKE_BOOT_IMAGE_IS_OK=true" >> "$GITHUB_ENV"
+          else
+            echo "Boot image is empty"; exit 1
+          fi
+
+      - name: Export kernel name from defconfig
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEFCONFIG_FILE="kernel_workspace/android-kernel/arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+          RAW_LOCALVERSION=$(grep -oP 'CONFIG_LOCALVERSION="\K[^"]+' "$DEFCONFIG_FILE" || true)
+          KERNEL_NAME=$(echo "${RAW_LOCALVERSION#-}")
+          [[ -z "$KERNEL_NAME" ]] && KERNEL_NAME="CustomKernel"
+          echo "KERNEL_LOCALVERSION=$KERNEL_NAME" >> "$GITHUB_ENV"
+
+      - name: Upload AnyKernel3
+        if: env.CHECK_FILE_IS_OK == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ANDROID_TAG }}${{ env.KERNEL_LOCALVERSION }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
+          path: kernel_workspace/AnyKernel3/*
+
+      - name: Upload Kernel Image
+        if: env.CHECK_FILE_IS_OK == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.KERNEL_IMAGE_NAME }}${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
+          path: kernel_workspace/android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }}
+
+      - name: Upload DTBO image
+        if: env.CHECK_DTBO_IS_OK == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dtbo-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
+          path: kernel_workspace/android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/dtbo.img
+
+      - name: Upload boot image
+        if: env.MAKE_BOOT_IMAGE_IS_OK == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
+          path: kernel_workspace/boot.img

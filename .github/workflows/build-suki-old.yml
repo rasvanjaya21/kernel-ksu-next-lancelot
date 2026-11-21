@@ -1,4 +1,4 @@
-name: Build Kernel
+name: Build SukiSU (A11+)
 
 on:
   workflow_dispatch:
@@ -6,66 +6,20 @@ on:
       select_device:
         description: 'Select device:'
         required: true
+        default: 'lancelot'
         type: choice
         options:
           - lancelot
           - merlin
-      build_ksun:
-        description: 'Build KernelSU-Next A13+'
-        required: true
-        default: true
-        type: boolean
-      build_ksun_old:
-        description: 'Build KernelSU-Next A11+'
-        required: true
-        default: true
-        type: boolean
-      build_suki:
-        description: 'Build SukiSU A13+'
-        required: true
-        default: true
-        type: boolean
-      build_suki_old:
-        description: 'Build SukiSU A11+'
-        required: true
-        default: true
-        type: boolean
 
 jobs:
-  generate-build-matrix:
-    name: What to build?
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set.outputs.matrix }}
-    steps:
-      - id: set
-        name: Generate build matrix
-        shell: bash
-        run: |
-          set -euo pipefail
-          targets=()
-          if [[ "${{ github.event.inputs.build_ksun }}" == "true" ]]; then targets+=("ksun"); fi
-            if [[ "${{ github.event.inputs.build_ksun_old }}" == "true" ]]; then targets+=("ksun-old"); fi
-          if [[ "${{ github.event.inputs.build_suki }}" == "true" ]]; then targets+=("suki"); fi
-          if [[ "${{ github.event.inputs.build_suki_old }}" == "true" ]]; then targets+=("suki-old"); fi
-
-          # Build JSON object: { "target": ["a","b",...] }
-          json=$(printf '%s\n' "${targets[@]}" | jq -R . | jq -s '{target: .}')
-          echo "matrix<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$json" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
   build:
-    needs: generate-build-matrix
     runs-on: ubuntu-24.04
     env:
       DEVICE: ${{ github.event.inputs.select_device }}
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
       CCACHE_HARDLINK: "true"
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.generate-build-matrix.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -85,7 +39,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TARGET_CONFIG_FILENAME="${{ matrix.target }}"
+          TARGET_CONFIG_FILENAME="suki-old"
           TARGET_CONFIG_FILENAME="${TARGET_CONFIG_FILENAME/-old/}"
           TARGET_CONFIG_FILENAME_SUFFIX="$TARGET_CONFIG_FILENAME"
           if [[ -f "config-${TARGET_CONFIG_FILENAME_SUFFIX}.env" ]]; then
@@ -93,7 +47,7 @@ jobs:
           else
             echo "Config file config-${TARGET_CONFIG_FILENAME_SUFFIX}.env not found"; exit 1
           fi
-          if [[ "${{ matrix.target }}" == *"-old" ]]; then
+          if [[ "suki-old" == *"-old" ]]; then
             echo "ANDROID_TAG=[A11+]" >> "$GITHUB_ENV"
           else
             echo "ANDROID_TAG=[A13+]" >> "$GITHUB_ENV"
@@ -239,7 +193,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
           curl -LSs "$KERNELSU_SETUP_SOURCE" | bash -s "${{ env.KERNELSU_TAG }}"
           KSU_VERSION="_$(cd "$(echo "$KERNELSU_SETUP_SOURCE" | cut -d/ -f5)" 2>/dev/null || cd KernelSU; expr "$(git rev-list --count HEAD)" + 10200)"
-          echo "UPLOADNAME=-KernelSU-${{ matrix.target }}$KSU_VERSION" >> "$GITHUB_ENV"
+          echo "UPLOADNAME=-KernelSU-suki-old$KSU_VERSION" >> "$GITHUB_ENV"
           if [[ "${{ env.KSU_REVERT }}" == "true" ]]; then
             git apply "$GITHUB_WORKSPACE/patches/KSU_REVERT.patch"
           fi
@@ -399,7 +353,19 @@ jobs:
             CROSS_COMPILE="$CROSS_COMPILE" \
             CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
             CROSS_COMPILE_COMPAT="$CROSS_COMPILE_COMPAT" \
-            LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+            LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip || {
+            echo "=== BUILD FAILED, RETRYING WITH V=1 ==="
+            make -j1 V=1 \
+              ARCH="${{ env.KERNEL_ARCH }}" \
+              O=out \
+              CC="$CC" \
+              CLANG_TRIPLE="${CLANG_TRIPLE:-}" \
+              CROSS_COMPILE="$CROSS_COMPILE" \
+              CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+              CROSS_COMPILE_COMPAT="$CROSS_COMPILE_COMPAT" \
+              LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+            exit 1
+          }
 
       - name: Check a kernel output files
         shell: bash
