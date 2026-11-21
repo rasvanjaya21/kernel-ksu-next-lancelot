@@ -333,7 +333,11 @@ jobs:
           fi
 
           if [[ "${{ env.OLD_ANDROID_SUPPORT }}" == "true" ]]; then
-            git apply "$GITHUB_WORKSPACE/patches/OLD_ANDROID_SUPPORT.patch"
+            if git apply --check "$GITHUB_WORKSPACE/patches/OLD_ANDROID_SUPPORT.patch" 2>/dev/null; then
+              git apply "$GITHUB_WORKSPACE/patches/OLD_ANDROID_SUPPORT.patch"
+            else
+              echo "OLD_ANDROID_SUPPORT.patch already applied or not applicable, skipping"
+            fi
             if grep -q "CONFIG_MMC_CRYPTO_LEGACY" "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"; then
               sed -i 's/# CONFIG_MMC_CRYPTO_LEGACY is not set/CONFIG_MMC_CRYPTO_LEGACY=y/' "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
               sed -i 's/CONFIG_MMC_CRYPTO_LEGACY=n/CONFIG_MMC_CRYPTO_LEGACY=y/' "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig" || true
