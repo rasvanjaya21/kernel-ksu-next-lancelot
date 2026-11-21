@@ -169,6 +169,7 @@ jobs:
             mkdir gcc-64
             tar -C gcc-64/ -Jxvf gcc-64.tar.xz --strip-components=1
             rm gcc-64.tar.xz
+            for f in gcc-64/bin/aarch64-none-linux-gnu-*; do [ -e "$f" ] && ln -sf "$(basename "$f")" "${f/aarch64-none-linux-gnu-/aarch64-linux-gnu-}"; done
             ls -l gcc-64/bin
             test -f gcc-64/bin/aarch64-linux-gnu-gcc && echo "Found: aarch64-linux-gnu-gcc" || echo "Missing: aarch64-linux-gnu-gcc"
           fi
@@ -177,6 +178,7 @@ jobs:
             mkdir gcc-32
             tar -C gcc-32/ -Jxvf gcc-32.tar.xz --strip-components=1
             rm gcc-32.tar.xz
+            for f in gcc-32/bin/arm-none-linux-gnueabihf-*; do [ -e "$f" ] && ln -sf "$(basename "$f")" "${f/arm-none-linux-gnueabihf-/arm-linux-gnueabi-}"; done
             ls -l gcc-32/bin
             test -f gcc-32/bin/arm-linux-gnueabi-gcc && echo "Found: arm-linux-gnueabi-gcc" || echo "Missing: arm-linux-gnueabi-gcc"
           fi
